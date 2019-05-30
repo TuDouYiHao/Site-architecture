@@ -1,1 +1,54 @@
 this is my rabbitmq cord
+（以下为三台同时操作，如果不是有特别说明！) 
+1,修改三台机器的主机名: 
+[root@localhost ~]# hostnamectl set-hostname note1 
+[root@localhost ~]# hostnamectl set-hostname note2
+ [root@localhost ~]# hostnamectl set-hostname note3
+ 2.三台机器都做hosts本地解析:
+ [root@rabbitmq1 ~]# cat /etc/hosts
+10.3.145.191  note1
+10.3.145.192  note2
+10.3.145.193  note3
+3.安装相关软件:三台机器相同操作 [root@note1 ~]# wget https://dl.bintray.com/rabbitmq/rpm/erlang/21/el/7/x86_64/ erlang-21.0.9-1.el7.centos.x86_64.rpm [root@note1 ~]# wget https://dl.bintray.com/rabbitmq/rpm/rabbitmq-server/v3.7.x/el/7/noarch/rabbitmqserver-3.7.7-1.el7.noarch.rpm [root@note1 ~]# yum -y localinstall erlang-21.0.9-1.el7.centos.x86_64.rpm [root@note1 ~]# yum -y localinstall rabbitmq-server-3.7.7-1.el7.noarch.rpm 添加开机启动： [root@note1 ~]# systemctl daemon-reload [root@note1 ~]# systemctl start rabbitmq-server [root@note1 ~]# systemctl enable  rabbitmq-server 
+查看端口：程序需要连接的端口号：[root@note1 ~]# netstat  -tunlp
+查看rabbitmq状态：
+[root@note1 ~]# /sbin/service rabbitmq-server status / start ----启动 或 [root@note1 ~]# rabbitmqctl status
+开启rabbitmq的web访问界面： [root@note1 ~]# rabbitmq-plugins enable rabbitmq_management ====================================================== 
+创建用户在其中一台台机器上面操作即可！ 创建用户和密码：
+ [root@note1 ~]#rabbitmqctl add_user tiger tiger
+ 设置创建的用户为管理员: 
+[root@note1 ~]#rabbitmqctl set_user_tags tiger administrator 
+查看用户：[root@note1 ~]#  rabbitmqctl list_users
+查看用户权限：[root@note1 ~]#  rabbitmqctl  list_user_permissions guest
+此处设置权限时注意'.*'之间需要有空格 三个'.*'分别代表了conf权限，read权限与write权限 例如：当没有给 1000phone设置这三个权限前是没有权限查询队列，在ui界面也看不见 给创建的用户授权: [root@note1 ~]# rabbitmqctl set_permissions -p "/" tiger  ".*" ".*" ".*"
+[root@note1 ~]#netstat -tunlp-----结果出现0 0.0.0.0:15672     0 ：：：5672访问10.3.145.191:15672
+开始部署集群三台机器都操作: 1.首先创建好数据存放目录和日志存放目录: 参考：https://blog.csdn.net/zhuchunyan_aijia/article/details/80800997?utm_source=blogxgwz6 [root@note1 ~]# mkdir -p /opt/rabbitmq/data 
+[root@note1 ~]# mkdir -p /opt/rabbitmq/logs 
+[root@note1 ~]# chmod 777 -R /opt/rabbitmq 
+[root@note1 ~]# chown rabbitmq.rabbitmq /opt/rabbitmq -R 
+创建配置文件:
+[root@note1 ~]# vim /etc/rabbitmq/rabbitmq-env.conf 
+[root@note1 ~]# cat /etc/rabbitmq/rabbitmq-env.conf RABBITMQ_MNESIA_BASE=/opt/rabbitmq/data 
+RABBITMQ_LOG_BASE=/opt/rabbitmq/logs 
+重启服务: 
+[root@note1 ~]# systemctl restart rabbitmq-server
+[root@note2 ~]# systemctl restart rabbitmq-server 
+[root@note3 ~]# systemctl restart rabbitmq-server 
+2.拷贝其中一台rabbitmq的cookie到另外两台。被拷贝的rabbitmq为master，在这里将rabbitmq1做为master Rabbitmq的集群是依附于erlang的集群来工作的,所以必须先构建起erlang的集群景象。Erlang的集群中各节点是经由 过程一个magic cookie来实现的,这个cookie存放在/var/lib/rabbitmq/.erlang.cookie中，文件是400的权 限。所以必须保证各节点cookie一致,不然节点之间就无法通信
+分别重启三个节点：
+ [root@note1 ~]#systemctl restart rabbitmq-server
+ [root@note2 ~]# systemctl restart rabbitmq-server 
+ [root@note3 ~]# systemctl restart rabbitmq-server
+将mq2、mq3作为内存节点加入mq1节点集群中 在note2、note3执行如下命令：
+ -------------------
+[root@note2 ~]# rabbitmqctl stop_app     ---停止节点，切记不是停止服务
+ Stopping rabbit application on node rabbit@rabbitmq2 ... 
+[root@note2 ~]# rabbitmqctl reset   -----如果有数据需要重置一下
+ Resetting node rabbit@rabbitmq2 ...
+ [root@note2 ~]# rabbitmqctl join_cluster rabbit@rabbitmq1   ------添加到那台节点，后面是节点的主机名 
+Clustering node rabbit@rabbitmq2 with rabbit@rabbitmq1 
+[root@note2 ~]# rabbitmqctl start_app  -----启动节点 
+Starting node rabbit@rabbitmq2 ... completed with 0 plugins. =====================================
+在三台机器查看集群状态:
+
+[root@note1 ~]#rabbitmqctl cluster_status
