@@ -1,0 +1,40 @@
+网络拓扑
+client:	CIP:物理机
+Director:	VIP:192.168.122.100
+Real Server:   RIP:192.168.122.10   192.168.122.20
+	     VIP:192.168.122.100   
+LVS/DR模式
+1 配置域名解析
+2 对每台DR进行以下配置：
+[root@tianyun ~]# yum -y install httpd
+[root@tianyun ~]# ip addr add dev lo 192.168.122.100/32			     //在lo接口上绑定VIP
+[root@tianyun ~]# echo 1 > /proc/sys/net/ipv4/conf/all/arp_ignore	     //non-arp
+[root@tianyun ~]# echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
+
+因为：realServer的vip有了，接着就是同一个网段中拥有两个vip, 客户端在网关发送arp广播需找vip时需要让realServer不接受响应.  
+解决：
+echo 1 >/proc/sys/net/ipv4/conf/eth0/arp_ignore 
+arp_ignore 设置为1，意味着当别人的arp请求过来的时候，如果接收的设备没有这个ip，就不做出响应(这个ip在lo上，lo不是接收设备的进口)
+echo 2 >/proc/sys/net/ipv4/conf/eth0/arp_announce   
+使用最好的ip来回应，什么是最好的ip？同一个网段内子网掩码最长的
+3 Director 分发器配置：
+[root@tianyun ~]# ip addr add dev eth0 192.168.122.100/32	//配置VIP
+[root@tianyun ~]# yum -y install ipvsadm				//RHEL确保LoadBalancer仓库可用
+定义LVS分发策略：
+[root@tianyun ~]# ipvsadm -C                        // 清除内核虚拟服务器表中的所有记录
+[root@tianyun ~]# ipvsadm -A -t 192.168.122.100:80 -s rr 
+[root@tianyun ~]# ipvsadm -a -t 192.168.122.100:80 -r 192.168.122.10 -g	
+[root@tianyun ~]# ipvsadm -a -t 192.168.122.100:80 -r 192.168.122.20 -g
+[root@tianyun ~]# ipvsadm-save
+[root@tianyun ~]# ipvsadm -Ln
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  	-> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.122.100:80 rr
+  	-> 192.168.122.10:80              Route   1      0          0
+  	-> 192.168.122.20:80              Route   1      0          0
+[root@tianyun ~]# ipvsadm -L -n
+[root@tianyun ~]# ipvsadm -L -n --stats			// 显示统计信息
+[root@tianyun ~]# ipvsadm -L -n --rate			//看速率	
+[root@tianyun ~]# ipvsadm -Ln -c				//查看LVS的连接条目
+关闭防火墙，物理机客户端测试
