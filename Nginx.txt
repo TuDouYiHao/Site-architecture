@@ -1,0 +1,199 @@
+一  yum安装Nginx
+install the prerequisites:yum -y install yum-utils
+
+to set up the yum reposity:
+vim /etc/yum.repos.d/nginx.repo
+[nginx-stable]
+name=nginx stable repo
+baseurl=http://nginx.org/packages/centos/$releasever/$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+
+[nginx-mainline]
+name=nginx mainline repo
+baseurl=http://nginx.org/packages/mainline/centos/$releasever/$basearch/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+
+to install nginx: yum -y install nginx  && systemctl start nginx
+
+1使用alias实现虚拟目录
+location /tiger { 
+    	alias /var/www/tiger; 
+    	index index.html;    #访问http://x.x.x.x/tiger时实际上访问是/var/www/tiger/index.html
+
+2、通过 stub_status 模块监控 nginx 的工作状态
+1）通过 nginx  -V 命令查看是否已安装 stub_status 模块
+2） 编辑 /etc/nginx/nginx.conf 配置文件
+#添加以下内容～～ 
+location /nginx-status { 
+      stub_status on; 
+      access_log    /var/log/nginx/nginxstatus.log;    #设置日志文件的位置 
+      auth_basic    "nginx-status";    #指定认证机制（与location后面的内容相同即可） 
+      auth_basic_user_file    /etc/nginx/htpasswd;     #指定认证的密码文件 
+      }      
+3）创建认证口令文件并添加用户 lzs 和 zsgg，密码用md5加密
+htpasswd -c -m /etc/nginx/htpasswd tiger             # -c 创建解密文件，-m MD5加密
+htpasswd -m /etc/nginx/htpasswd zsgg
+
+htpasswd 是开源 http 服务器 apache httpd 的一个命令工具，用于生成 http 基本认证的密码文件。
+安装htpasswd: yum -y install httpd-tools
+4）重启服务
+配置通过域名区分的虚拟主机
+[root@nginx]# cat conf/nginx.conf
+worker_processes 1;
+
+events {
+worker_connections 1024;
+}
+
+http {
+include mime.types;
+default_type application/octet-stream;
+
+    server {
+        listen        80;
+        server_name  web.tiger.com;
+        location /{
+            root /tiger/html;
+            index index.html index.htm;
+                }
+        }
+    server {
+        listen        80;
+        server_name  web.1000phone.com;
+        location /{
+            root /1000phone/html;
+            index index.html index.htm;
+                }
+        }
+}
+2）为 域名为 web.1000phone.com 的虚拟机，创建 index 文件
+3）重新加载配置
+# 如果编译安装的执行
+[root@nginx]# /usr/local/nginx/bin/nginx -s reload
+# 如果 yum 安装的执行
+[root@nginx]# nginx -s reload
+4）客户端配置路由映射
+在 C:\Windows\System32\drivers\etc\hosts 文件中添加两行(linux:/etc/hosts)
+10.219.24.26 web.tiger.com
+10.219.24.26 web.1000phone.com
+
+基于IP的虚拟主机
+1）一块网卡绑定多个IP：[root@nginx]# ifconfig eth0:1 192.168.95.200
+2）配置通过IP区分虚拟主机：
+[root@nginx]# cat conf/nginx.conf
+user root root; #说明：这里的user根据 自己的nginx.conf文件所在的目录的属主属性而定 
+worker_processes 1;
+
+events {
+worker_connections 1024;
+}
+
+http {
+include mime.types;
+default_type application/octet-stream;
+
+server {
+listen 192.168.95.134:80;
+server_name www.nginx01.com;
+location / {
+root html;
+index index.html index.htm;
+}
+}
+
+server {
+listen 192.168.95.100:80;
+server_name www.nginx01.com;
+location / {
+root /root/html;
+index index.html index.htm;
+}
+}
+}
+3）重启nginx进程
+[root@nginx]#nginx -s reopen
+---删除绑定的IP
+[root@nginx]#ifconfig eth0:1 192.168.95.100 down
+
+
+基于端口的虚拟主机
+[root@nginx]# cat conf/nginx.conf
+user root root; #说明：这里的user根据 自己的nginx.conf文件所在的目录的属主属性而定 
+worker_processes 1;
+
+events {
+worker_connections 1024;
+}
+
+http {
+include mime.types;
+default_type application/octet-stream;
+
+server {
+listen 80;
+server_name www.1000phone01.com;
+location / {
+root html;
+index index.html index.htm;
+}
+}
+server  {
+listen 8080;
+server_name www.1000phone02.com;
+location / {
+root /root/html;
+index index.html index.htm;
+}
+}
+}
+重启reload nginx 进程
+[root@nginx]#nginx -s  reload
+
+负载均衡
+upstream myweb { 
+      server 172.17.14.2:8080;
+      server 172.17.14.3:8080;
+    }
+ server {
+        ....
+        location / {         
+           proxy_pass  http://myweb;  #请求转向 myweb 定义的服务器列表         
+        } 
+----或者--
+upstream mysvr {
+      server  http://172.17.14.2:8080;
+      server  http://172.17.14.3:8080;
+    }
+ server {
+        ....
+        location  / {         
+           proxy_pass  mysvr;  #请求转向myweb 定义的服务器列表         
+        } 
+
+配置实例
+****1、热备：如果你有2台服务器，当一台服务器发生事故时，才启用第二台服务器给提供服务。服务器处理请求的顺序：AAAAAA突然A挂啦，BBBBBBBBBBBBBB.....****
+upstream myweb {
+	server 172.17.14.2:8080;
+	server 172.17.14.3:8080 backup;  #热备
+****2、轮询：nginx默认就是轮询其权重都默认为1，服务器处理请求的顺序：ABABABABAB.
+upstream myweb { 
+      server 172.17.14.2:8080; 
+      server 172.17.14.3:8080;      
+    }
+*****3、加权轮询：跟据配置的权重的大小而分发给不同服务器不同数量的请求。如果不设置，则默认为1。下面服务器的请求顺序为：ABBABBABBABBABB....
+upstream myweb { 
+      server 172.17.14.2:8080 weight=1;
+      server 172.17.14.3:8080 weight=2;
+}
+*******4、ip_hash:nginx会让相同的客户端ip请求相同的服务器
+upstream myweb { 
+      server 172.17.14.2:8080; 
+      server 172.17.14.3:8080;
+      ip_hash;
+    }
+
+
