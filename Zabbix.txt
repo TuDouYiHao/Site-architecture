@@ -1,0 +1,357 @@
+Zabbix的安装及监控
+
+server   192.168.37.111    zabbit-server   开启监控功能
+node1   192.168.37.122   zabbix-agent
+
+
+配置好yum源，关闭防火墙，各节点时间同步，各节点可以通过主机名互相通信
+
+[root@server ~]# systemctl  stop firewalld
+[root@server ~]# setenforce 0
+
+2、Zabbix的安装
+1）更新yum仓库:我们去官网下载一个包`zabbix-release-3.4-2.el7.noarch.rpm`，本地安装至我们的虚拟机，这样，我们本地就有了新的yum源，可以直接安装zabbix服务：
+[root@server ~]# yum -y install wget
+[root@server ~]# wget http://repo.zabbix.com/zabbix/3.4/rhel/7/x86_64/zabbix-release-3.4-2.el7.noarch.rpm
+
+安装zabbix源（官方）
+[root@server ~]# rpm -ivh https://repo.zabbix.com/zabbix/4.0/rhel/7/x86_64/zabbix-release-4.0-1.el7.noarch.rpm
+
+下载安装：[root@server ~]# rpm -ivh zabbix-release-3.4-2.el7.noarch.rpm
+更新yum仓库：[root@server ~]# yum repolist 
+
+安装：[root@server ~]# yum -y install zabbix-agent zabbix-get zabbix-sender zabbix-server-mysql zabbix-web zabbix-web-mysql
+或者（官方）
+[root@server ~]# yum-config-manager --enable rhel-7-server-optional-rpms
+
+2）安装设置数据库：
+1、创建 mariadb.repo
+vim /etc/yum.repos.d/mariadb.repo
+写入以下内容：
+[mariadb]
+name = MariaDB 
+baseurl = https://mirrors.ustc.edu.cn/mariadb/yum/10.4/centos7-amd64 
+gpgkey=https://mirrors.ustc.edu.cn/mariadb/yum/RPM-GPG-KEY-MariaDB 
+gpgcheck=1
+
+2、yum 安装最新版本 mariadb：[root@server ~]# yum install MariaDB-server MariaDB-client
+首先，我们修改一下配置文件——`/etc/my.cnf.d/server.cnf`：
+[root@server ~]# vim /etc/my.cnf.d/server.cnf
+    [mysqld]
+    skip_name_resolve = ON          #跳过主机名解析
+    innodb_file_per_table = ON      #
+    innodb_buffer_pool_size = 256M  #缓存池大小
+    max_connections = 2000          #最大连接数
+
+    log-bin = master-log            #开启二进制日志
+
+2、重启我们的数据库服务：[root@server ~]# systemctl restart mariadb
+                                        [root@server ~]# mysql_secure_installation  #初始化mariadb
+
+3、创建数据库并授权账号
+[root@server ~]# mysql
+MariaDB [(none)]> create database zabbix character set 'utf8';  # 创建zabbix数据库
+MariaDB [(none)]> grant all on zabbix.* to 'zbxuser'@'192.168.37.%' identified by 'keer';
+# 注意授网段
+MariaDB [(none)]> flush privileges;           # 刷新授权
+
+4、**导入表**
+,首先，我们来查看一下，`zabbix-server-mysql`这个包提供了什么：
+[root@server ~]# rpm -ql zabbix-server-mysql
+/etc/logrotate.d/zabbix-server
+/etc/zabbix/zabbix_server.conf
+/usr/lib/systemd/system/zabbix-server.service
+/usr/lib/tmpfiles.d/zabbix-server.conf
+/usr/lib/zabbix/alertscripts
+/usr/lib/zabbix/externalscripts
+/usr/sbin/zabbix_server_mysql
+/usr/share/doc/zabbix-server-mysql-3.2.6
+/usr/share/doc/zabbix-server-mysql-3.2.6/AUTHORS
+/usr/share/doc/zabbix-server-mysql-3.2.6/COPYING
+/usr/share/doc/zabbix-server-mysql-3.2.6/ChangeLog
+/usr/share/doc/zabbix-server-mysql-3.2.6/NEWS
+/usr/share/doc/zabbix-server-mysql-3.2.6/README
+/usr/share/doc/zabbix-server-mysql-3.2.6/create.sql.gz      #生成表的各种脚本
+/usr/share/man/man8/zabbix_server.8.gz
+/var/log/zabbix
+/var/run/zabbix
+
+我们来使用这个文件生成我们所需要的表：
+[root@server ~]# cd  /usr/share/doc/zabbix-server-mysql-3.2.6/
+[root@server ~]#gzip -d create.sql.gz
+[root@server ~]# head  create.sql           #查看一下表头
+CREATE TABLE `users` (
+    `userid`                 bigint unsigned                           NOT NULL,
+    `alias`                  varchar(100)    DEFAULT ''                NOT NULL,
+    `name`                   varchar(100)    DEFAULT ''                NOT NULL,
+    `surname`                varchar(100)    DEFAULT ''                NOT NULL,
+    `passwd`                 char(32)        DEFAULT ''                NOT NULL,
+    `url`                    varchar(255)    DEFAULT ''                NOT NULL,
+    `autologin`              integer         DEFAULT '0'               NOT NULL,
+    `autologout`             integer         DEFAULT '900'             NOT NULL,
+    `lang`                   varchar(5)      DEFAULT 'en_GB'           NOT NULL,
+
+我们直接把这个表导入至我们的数据库即可：
+[root@server zabbix-server-mysql-4.0.9]# mysql -uzbxuser -h192.168.37.111 -p  < create.sql 
+Enter password: 
+ERROR 1046 (3D000) at line 1: No database selected
+如果报如下错误
+ERROR 1046 (3D000) at line 1: No database selected
+在create.sql添加
+USE zabbix;
+导入以后，我们进去数据库查看一下：
+[root@server ~]# mysql -uzbxuser -h192.168.37.111 -p
+Enter password:
+MariaDB [(none)]> show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| zabbix             |
++--------------------+
+MariaDB [(none)]> use zabbix;
+Database changed
+MariaDB [zabbix]> show tables;
++----------------------------+
+| Tables_in_zabbix           |
++----------------------------+
+| acknowledges               |
+| actions                    |
+| alerts                     |
+……
+| usrgrp                     |
+| valuemaps                  |
++----------------------------+
+127 rows in set (0.00 sec)
+
+### 3、配置 server 端
+数据库准备好了以后，我们要去修改server端的配置文件。
+
+[root@server ~]# cd /etc/zabbix/
+[root@server zabbix]# ls
+web  zabbix_agentd.conf  zabbix_agentd.d  zabbix_server.conf
+#为了方便我们以后恢复，我们把配置文件备份一下
+[root@server zabbix]# cp zabbix_server.conf{,.bak}
+[root@server zabbix]# vim zabbix_server.conf
+ListenPort=10051            #默认监听端口
+SourceIP=192.168.37.111     #发采样数据请求的IP
+
+DBHost=192.168.37.111       #数据库对外的主机
+DBName=zabbix               #数据库名称
+DBUser=zbxuser              #数据库用户
+DBPassword=keer             #数据库密码
+DBPort=3306                 #数据库启动端口
+以上，我们的基本配置已经完成，可以开启服务了：
+[root@server zabbix]# systemctl start zabbix-server.service
+开启服务以后，去确认一下我们的端口有没有开启：
+[root@server zabbix]# ss -nutl |grep 10051
+tcp    LISTEN     0      128       *:10051                 *:*                  
+tcp    LISTEN     0      128      :::10051                :::*    
+
+===========================================
+4、配置 web GUI
+我们先来查看一下，我们web GUI的配置文件在哪里：
+[root@server ~]# rpm -ql zabbix-web | less
+/etc/httpd/conf.d/zabbix.conf
+/etc/zabbix/web
+/etc/zabbix/web/maintenance.inc.php
+/etc/zabbix/web/zabbix.conf.php
+/usr/share/doc/zabbix-web-3.2.6
+/usr/share/doc/zabbix-web-3.2.6/AUTHORS
+/usr/share/doc/zabbix-web-3.2.6/COPYING
+/usr/share/doc/zabbix-web-3.2.6/ChangeLog
+/usr/share/doc/zabbix-web-3.2.6/NEWS
+/usr/share/doc/zabbix-web-3.2.6/README
+..........
+可以看出，有一个`/etc/httpd/conf.d/zabbix.conf`文件，这个配置文件就是帮我们做映射的文件，我们可以去看一看这个文件：Alias /zabbix /usr/share/zabbix     #我们访问的时候要在主机后加上/zabbix来访问我们这个服务
+
+此区域内实验时未操作
+=======================================================
+
+
+设置时区
+vim /etc/php.ini
+    [Date]
+    ; Defines the default timezone used by the date functions
+    ; http://php.net/date.timezone
+    date.timezone = Asia/Shanghai
+
+接下来，我们就可以启动我们的`httpd`服务了：
+[root@server zabbix]# systemctl start httpd.service
+[root@server zabbix]# ss -nutl
+
+浏览器访问并进行初始化设置:我们使用浏览器访问`192.168.37.111/zabbix`，第一次访问时需要进行一些初始化的设置，我们按照提示操作即可
+
+database type :MYSQL
+database host :192.168.37.111
+database port :0
+database name :zabbix
+user  :zabbix
+password:keer
+点击下一步
+Host  192.168.37.111-主机名或IP都可
+Port   10051
+Name server--此步骤可以跳过
+一直点击下一步
+
+登录  username   admin
+         password    zabbix
+
+
+6、配置 agent 端
+安装 zabbix:同样的，我们先来安装zabbix。下载包，注释epel源，安装所需的包。具体步骤如下：
+[root@node1 ~]# wget http://repo.zabbix.com/zabbix/3.4/rhel/7/x86_64/zabbix-release-3.4-2.el7.noarch.rpm
+[root@node1 ~]# rpm -ivh zabbix-release-3.4-2.el7.noarch.rpm 
+[root@node1 ~]# yum install zabbix-agent zabbix-sender -y
+
+2）修改配置文件
+一样的，我们先查一下包内有什么：
+[root@node1 zabbix]# rpm -ql zabbix-agent 
+/etc/logrotate.d/zabbix-agent
+/etc/zabbix/zabbix_agentd.conf
+/etc/zabbix/zabbix_agentd.d
+/etc/zabbix/zabbix_agentd.d/userparameter_mysql.conf
+/usr/lib/systemd/system/zabbix-agent.service
+/usr/lib/tmpfiles.d/zabbix-agent.conf
+/usr/sbin/zabbix_agentd
+/usr/share/doc/zabbix-agent-3.4.4
+/usr/share/doc/zabbix-agent-3.4.4/AUTHORS
+/usr/share/doc/zabbix-agent-3.4.4/COPYING
+/usr/share/doc/zabbix-agent-3.4.4/ChangeLog
+/usr/share/doc/zabbix-agent-3.4.4/NEWS
+/usr/share/doc/zabbix-agent-3.4.4/README
+/usr/share/man/man8/zabbix_agentd.8.gz
+/var/log/zabbix
+/var/run/zabbix
+
+对配置文件做一个备份，然后去修改配置文件:
+[root@node1 ~]# cd /etc/zabbix/
+[root@node1 ~]# cd /etc/zabbix/
+[root@node1 zabbix]# ls
+zabbix_agentd.conf  zabbix_agentd.d
+[root@node1 zabbix]# cp zabbix_agentd.conf{,.bak}
+[root@node1 zabbix]# vim zabbix_agentd.conf
+
+Server=192.168.37.111       #指明服务器是谁的
+ListenPort=10050            #自己监听的端口
+ListenIP=0.0.0.0            #自己监听的地址，0.0.0.0表示本机所有地址
+StartAgents=3               #优化时使用的
+
+ServerActive=192.168.37.111 #主动监控时的服务器
+Hostname=node1.keer.com     #自己能被server端识别的名称
+
+修改完成之后，我们保存退出。然后就可以启动服务了:
+[root@node1 zabbix]# systemctl start zabbix-agent.service
+照例查看端口是否已开启
+[root@node1 zabbix]# ss -ntul |grep 10050
+tcp    LISTEN     0      128       *:10050                 *:*  
+
+
+监控步骤：
+2）创建主机及主机群组 
+3）监控项(items)  进入 配置 ---> 主机 ---> node1 ---> 监控项（items）---> 创建监控项
+4）触发器（trigger）进入 配置 ---> 主机 ---> node1 ---> 触发器（trigger）---> 创建触发器
+5）定义动作（action）进入 配置 ---> 动作 ---> 创建动作（注意选择事件源为触发器）
+6）报警媒介  点击 管理->报警媒介类型->创建媒体类型
+然后在页面中填入你的报警媒介类型信息，脚本名称任意，存放于/usr/lib/zabbix/alertscripts (生产上的测试服放这：/usr/local/zabbix/share/zabbix/alertscripts）
+名称：sendmail                   //名称任意
+类型：脚本
+脚本名称：sendmail.sh      
+脚本参数：                          //一定要写，否则可能发送不成功
+    {ALERT.SENDTO}              //照填，收件人变量
+    {ALERT.SUBJECT}             //照填，邮件主题变量，变量值来源于‘动作’中的‘默认接收人’
+    {ALERT.MESSAGE}           //照填，邮件正文变量，变量值来源于‘动作’中的‘默认信息’
+
+配置完成后,不要忘记点击存档,保存你的配置。  
+我们可以看出，还需要在虚拟机上进行两项操作，一是修改sudo配置文件使zabbix用户能够临时拥有管理员权限；二是修改zabbix配置文件使其允许接收远程命令。我们进行如下操作：
+[root@node1 ~]# visudo          #相当于“vim /etc/sudoers”
+    ## Allow root to run any commands anywhere
+    root    ALL=(ALL)   ALL
+    zabbix    ALL=(ALL)   NOPASSWD: ALL     #添加的一行，表示不需要输入密码
+
+[root@node1 ~]# vim /etc/zabbix/zabbix_agentd.conf
+    EnableRemoteCommands=1          #允许接收远程命令
+    LogRemoteCommands=1             #把接收的远程命令记入日志
+
+[root@node1 ~]# systemctl restart zabbix-agent.service
+
+添加邮件报警功能
+安装MUA软件：mailx
+
+[root@server ~]# yum install mailx  -y
+[root@server ~]#  mail -V
+配置公网邮箱信息：vim /etc/mail.rc   追加以下内容
+set from=18612540627@163.com（邮箱地址） 
+ set smtp=smtp.163.com（smtp服务器） 
+ set smtp-auth-user=18612540627@163.com(用户名) 
+ set smtp-auth-password=yanqiang20182018（邮箱密码-这里是授权码） 
+ set smtp-auth=login
+
+手动发送邮件测试：mailx -v -s 'hello' '收件人@163.com'
+手写邮件内容 （回车，然后ctrl+d正常结束)
+
+修改zabbix服务端配置文件＆编写脚本：
+   
+指定脚本的存储路径:[root@server ~]# vim /etc/zabbix/zabbix_server.conf
+AlertScriptsPath=/usr/lib/zabbix/alertscripts
+编写邮件脚本:
+cd /usr/lib/zabbix/alertscripts
+vim sendmail.sh    
+#!/bin/sh 
+#export.UTF-8
+echo "$3" | sed s/'\r'//g | mailx -s "$2" $1
+修改权限：chmod u+x sendmail.sh && chown zabbix.zabbix sendmail.sh
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
