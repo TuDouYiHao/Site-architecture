@@ -1,0 +1,134 @@
+1、Keepalived VRRP 介绍
+Virtual Route Redundancy Protocol，即虚拟路由冗余协议。它主要是实现路由器高可用的容错协议。
+将多台路由器组成路由器组（Router Group），组中包括Master及Backup，在外部看来就像一台路由
+器，拥有一个VIP。Master会发送组播消息，当Backup在指定的时间收不到vrrp包就会认为master宕掉，
+然后通过VRRP协议再次竞选新的路由器当Master，从而保证路由器的高可用。
+
+在VRRP协议实现中，虚拟路由器使用00-00-5E-00-01-XX作为虚拟MAC地址，XX就是唯一的VRID。
+LVS_Director + KeepAlived
+
+KeepAlived在该项目中的功能：
+1. 管理IPVS的路由表（包括对RealServer做健康检查）
+2. 实现调度器的HA
+http://www.keepalived.org
+
+[root@tianyun ~]# tcpdump -i eth0 -nn vrrp
+注：
+在主/备节点抓包，正常应该看到当前活跃的节点向224.0.0.18发送组播
+如果均看到本机向224.0.0.18发送组播，则是心跳故障，可能是防火墙阻止的组播，同时建议关闭SElinux
+
+同一个广播域中有多套Keepalived HA Cluster，它们使用的组播地址都是224.0.0.18，通过virtual_router_id区分
+
+Keepalived所执行的外部脚本命令建议使用绝对路径
+=================================================================================
+
+项目环境： VS/DR
+
+Client						                   192.168.122.1
+ 
+Director分发器	主192.168.122.10	               备192.168.122.20 	    VIP    192.168.122.100
+
+
+Real Server		192.168.122.30     192.168.122.40	 192.168.122.50 	 VIP lo192.168.122.100/32
+
+
+实施步骤：
+1. RS配置(web1,web2)
+配置好网站服务器，测试所有RS														   
+[root@web1 ~]# echo "ip addr add dev lo 192.168.122.100/32" >> /etc/rc.local				
+[root@web1 ~]# echo "net.ipv4.conf.all.arp_ignore = 1" >> /etc/sysctl.conf
+[root@web1 ~]# sysctl -p
+[root@web1 ~]# yum -y install httpd php php-mysql
+[root@web1 ~]# echo "web1..." >> /var/www/html/index.html 
+
+2. 主/备调度器安装软件
+[root@lvs-master ~]# yum -y install ipvsadm keepalived 
+[root@lvs-backup ~]# yum -y install ipvsadm keepalived
+
+3. Keepalived
+lvs-master
+获得Real Server测试页面的MD5SUM值
+[root@lvs-master ~]# genhash -s 192.168.122.30 -p 80 -u /test.html
+MD5SUM = f5ac8127b3b6b85cdc13f237c6005d80
+
+[root@lvs-master ~]# vim /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+
+global_defs {
+   router_id lvs-master	            //辅助改为lvs-backup
+}
+
+vrrp_instance VI_1 {
+    state BACKUP				
+    nopreempt                              //不抢占
+    interface eth0				            //VIP绑定接口
+    mcast src ip x.x.x.x                //发送组播的源IP，心跳线网卡
+    virtual_router_id 80		            //VRID 同一组集群，主备一致  虚拟路由器 MAC 00-00-5E-00-01-{VRID}
+    priority 100					            //本节点优先级，辅助改为50
+    advert_int 1                            //检查间隔，默认为1s
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.122.100
+    }
+}
+
+virtual_server 192.168.122.100 80 {   //LVS配置，可以是fwmark 80
+    delay_loop 6
+    lb_algo rr                                    //LVS调度算法
+    lb_kind DR                                  //LVS集群模式（路由模式）
+    nat_mask 255.255.255.0
+    persistence_timeout 20            //持久性连接
+    protocol TCP                              //健康检查使用的协议
+    sorry_server 2.2.2.2 80             //当所有real server不可用时
+  
+    real_server 192.168.122.30 80 {
+        weight 1
+        inhibit_on_failure                  //当该节点失败时，把权重设置为0，而不是从IPVS中删除
+        HTTP_GET {						      //健康检查
+            url {
+              path /test.html
+              digest f5ac8127b3b6b85cdc13f237c6005d80
+            }
+            connect_port 80                 //检查的端口
+            connect_timeout 3            //连接超时的时间
+            nb_get_retry 3                   //重新连接的次数
+            delay_before_retry 2         //重连的间隔
+        }
+    }
+
+    real_server 192.168.122.40 80 {
+        weight 1
+        inhibit_on_failure
+        HTTP_GET {
+            url {
+              path /test.html
+              digest f5ac8127b3b6b85cdc13f237c6005d80
+            }
+            connect_timeout 3
+            nb_get_retry 3
+            delay_before_retry 3
+        }
+     }
+}
+
+lvs-backup
+
+5. 启动KeepAlived（主备均启动）
+[root@lvs-master ~]# chkconfig keepalived on
+[root@lvs-master ~]# service keepalived start
+[root@lvs-master ~]# tail -f /var/log/messages
+
+[root@tianyun ~]# ipvsadm -Ln
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.122.100:80 wrr
+  -> 192.168.122.30:80               Route   1      0          0         
+  -> 192.168.122.30:80               Route   3      0          0   
+
+
+LB集群测试
+所有分发器和Real Server都正常
