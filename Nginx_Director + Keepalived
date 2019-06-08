@@ -1,0 +1,90 @@
+Nginx_Director + Keepalived
+两台机器各自下载nginx
+=================================================================================
+一、Nginx负载均衡
+主/备调度器均能够实现正常调度
+
+二、Keepalived实现调度器HA
+1. 主/备调度器安装软件
+[root@master ~]# yum -y install keepalived 
+[root@backup ~]# yum -y install keepalived
+
+2. Keepalived
+MASTER
+[root@tianyun ~]# vim /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+
+global_defs {
+   router_id director1		//辅助改为director2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    nopreempt				    
+    interface eth0				//VIP绑定接口
+    virtual_router_id 80		//整个集群的调度器一致
+    priority 100					//辅助改为50
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.1.80
+    }
+}
+
+3. 启动KeepAlived（主备均启动）
+[root@tianyun ~]# chkconfig keepalived on
+[root@tianyun ~]# service keepalived start
+[root@tianyun ~]# ip addr
+到此：
+可以解决心跳故障  keepalived
+不能解决Nginx服务故障
+
+4. 扩展对调度器Nginx健康检查（可选）
+思路：
+让Keepalived以一定时间间隔执行一个外部脚本，脚本的功能是当Nginx失败，则关闭本机的Keepalived
+a. script
+[root@master ~]# cat /etc/keepalived/check_nginx_status.sh
+#!/bin/bash											        	
+/usr/bin/curl -I http://localhost &>/dev/null	
+if [ $? -ne 0 ];then									    	
+	/etc/init.d/keepalived stop					    	
+fi															        	
+[root@master ~]# chmod a+x /etc/keepalived/check_nginx_status.sh
+
+b. keepalived使用script
+! Configuration File for keepalived
+
+global_defs {
+   router_id director1
+}
+
+vrrp_script check_nginx {
+   script "/etc/keepalived/check_nginx_status.sh"
+   interval 5
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    nopreempt
+    virtual_router_id 90
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass tianyun
+    }
+    
+    virtual_ipaddress {
+        192.168.1.80
+    }
+
+    track_script {
+        check_nginx
+    }
+}
+
+注：必须先启动nginx，再启动keepalived
